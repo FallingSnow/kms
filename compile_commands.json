@@ -1,0 +1,15 @@
+[
+  {
+    "arguments": [
+      "/usr/bin/gcc",
+      "-c",
+      "-o",
+      "decode.o",
+      "decode.c",
+      "-Ofast"
+    ],
+    "directory": "/home/alarm/video",
+    "file": "/home/alarm/video/decode.c",
+    "output": "/home/alarm/video/decode.o"
+  }
+]
