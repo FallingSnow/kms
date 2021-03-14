@@ -7,6 +7,7 @@
 #define NUM_BUFFERS 2
 
 struct Framebuffer {
+  __u32 offsets[4];
   void *ptr;
   uint64_t size;
   long width;

@@ -1,20 +1,20 @@
-// #include <bits/stdint-uintn.h>
 #include <errno.h>
-// #include <fcntl.h>
-// #include <libdrm/drm.h>
-// #include <libdrm/drm_mode.h>
-// #include <linux/fb.h>
-// #include <linux/videodev2.h>
-// #include <stdbool.h>
+#include <libdrm/drm_fourcc.h>
 #include <stdio.h>
-// #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
-// #include <time.h>
-// #include <unistd.h>
 
 #include "drm.h"
+
+
+// OPTIMIZE: Map the dumb buffer to a frame buffer
+// https://www.systutorials.com/docs/linux/man/7-drm-memory/
+
+// OPTIMIZE: Use driver buffers rather than dumb buffers
+
+// OPTIMIZE: Use dma-prime file descriptors
+// https://gist.github.com/Miouyouyou/2f227fd9d4116189625f501c0dcf0542
 
 // Most of this code is from https://github.com/6by9/v4l2_m2m
 
@@ -28,7 +28,8 @@ static int vsync_drm_wait(int drm_fd) {
   int ret = -1;
   drm_wait_vblank_t vbl;
 
-  vbl.request.type = _DRM_VBLANK_RELATIVE, vbl.request.sequence = 1;
+  vbl.request.type = _DRM_VBLANK_RELATIVE;
+  vbl.request.sequence = 10;
 
   do {
     ret = ioctl(drm_fd, DRM_IOCTL_WAIT_VBLANK, &vbl);
@@ -45,25 +46,30 @@ static int vsync_drm_wait(int drm_fd) {
 }
 
 bool drm_swap_buffers_page_flip(int dri_fd, struct Framebuffer *fb,
-                            struct drm_mode_crtc *crtc) {
+                                struct drm_mode_crtc *crtc) {
+    // printf("Flipping page\n");
   struct drm_mode_crtc_page_flip_target flip_target = {0};
-  union drm_wait_vblank wait = {0};
-  int err;
+  int err = 0;
 
   flip_target.crtc_id = crtc->crtc_id;
   flip_target.fb_id = fb->id;
+  // printf("Flipping page to %d\n", fb->id);
+
+  // Since we schedules a page flip we need to wait for it to actually happen
+  // vsync_drm_wait(dri_fd);
   err = ioctl(dri_fd, DRM_IOCTL_MODE_PAGE_FLIP,
               &flip_target); // request a page flip
   if (err < 0) {
 
     if (errno == EBUSY) {
+      printf("Buffer page flip already pending. Waiting for vblank.\n");
       vsync_drm_wait(dri_fd);
 
       return drm_swap_buffers_page_flip(dri_fd, fb, crtc);
     }
 
     fprintf(stderr, "Error requesting page flip, err = %d, status = %s\n", err,
-           strerror(errno));
+            strerror(errno));
     return true;
   }
 
@@ -71,29 +77,30 @@ bool drm_swap_buffers_page_flip(int dri_fd, struct Framebuffer *fb,
 }
 
 bool drm_swap_buffers_set_crtc(int dri_fd, struct Framebuffer *fb,
-                           struct drm_mode_crtc *crtc) {
+                               struct drm_mode_crtc *crtc) {
   int err;
   crtc->fb_id = fb->id;
 
   err = ioctl(dri_fd, DRM_IOCTL_SET_MASTER, 0);
   if (err < 0) {
-    fprintf(stderr, "Error getting KMS master status, status = %d, status = %s\n", err,
-           strerror(errno));
+    fprintf(stderr,
+            "Error getting KMS master status, status = %d, status = %s\n", err,
+            strerror(errno));
     return true;
   }
 
   err = ioctl(dri_fd, DRM_IOCTL_MODE_SETCRTC, crtc); // get crtc
   if (err) {
     fprintf(stderr, "Unable to set crtc, status = %d, status = %s\n", err,
-           strerror(errno));
+            strerror(errno));
     return true;
   }
 
   // Stop being the "master" of the DRI device
   err = ioctl(dri_fd, DRM_IOCTL_DROP_MASTER, 0);
   if (err) {
-    fprintf(stderr, "Unable to drop KMS master, status = %d, status = %s\n", err,
-           strerror(errno));
+    fprintf(stderr, "Unable to drop KMS master, status = %d, status = %s\n",
+            err, strerror(errno));
     return true;
   }
 
@@ -117,7 +124,7 @@ int drm_set_mode(int dri_fd, struct Screen *screen) {
   err = ioctl(dri_fd, DRM_IOCTL_MODE_GETENCODER, &enc); // get encoder
   if (err) {
     fprintf(stderr, "Unable to get encoder, status = %d, status = %s\n", err,
-           strerror(errno));
+            strerror(errno));
     return err;
   }
 
@@ -125,8 +132,8 @@ int drm_set_mode(int dri_fd, struct Screen *screen) {
   crtc->crtc_id = enc.crtc_id;
   err = ioctl(dri_fd, DRM_IOCTL_MODE_GETCRTC, &crtc); // get crtc
   if (err) {
-    printf("Warning: Unable to get current crtc, status = %d, status = %s\n", err,
-           strerror(errno));
+    printf("Warning: Unable to get current crtc, status = %d, status = %s\n",
+           err, strerror(errno));
   }
 
   crtc->fb_id = screen->buffers[0].id;
@@ -137,7 +144,7 @@ int drm_set_mode(int dri_fd, struct Screen *screen) {
   err = ioctl(dri_fd, DRM_IOCTL_MODE_SETCRTC, crtc); // get crtc
   if (err) {
     fprintf(stderr, "Unable to set crtc, status = %d, status = %s\n", err,
-           strerror(errno));
+            strerror(errno));
     return err;
   }
 
@@ -156,7 +163,7 @@ int create_buffers(int dri_fd, struct drm_mode_modeinfo *conn_mode_buf,
 
   struct drm_mode_create_dumb create_dumb = {0};
   struct drm_mode_map_dumb map_dumb = {0};
-  struct drm_mode_fb_cmd cmd_dumb = {0};
+  struct drm_mode_fb_cmd2 cmd_dumb = {0};
   int err;
 
   for (int b = 0; b < NUM_BUFFERS; b++) {
@@ -166,27 +173,33 @@ int create_buffers(int dri_fd, struct drm_mode_modeinfo *conn_mode_buf,
     // find a valid crtc with modes.
     create_dumb.width = conn_mode_buf->hdisplay;
     create_dumb.height = conn_mode_buf->vdisplay;
-    create_dumb.bpp = 32;
-    create_dumb.flags = 0;
-    create_dumb.pitch = 0;
-    create_dumb.size = 0;
-    create_dumb.handle = 0;
+    create_dumb.bpp = 16;
     err = ioctl(dri_fd, DRM_IOCTL_MODE_CREATE_DUMB, &create_dumb);
     if (err) {
       printf("Failed to create dumb buffer, status = %d, status = %s\n", err,
              strerror(errno));
+      return err;
     }
 
     cmd_dumb.width = create_dumb.width;
     cmd_dumb.height = create_dumb.height;
-    cmd_dumb.bpp = create_dumb.bpp;
-    cmd_dumb.pitch = create_dumb.pitch;
-    cmd_dumb.depth = 24;
-    cmd_dumb.handle = create_dumb.handle;
-    err = ioctl(dri_fd, DRM_IOCTL_MODE_ADDFB, &cmd_dumb);
+    cmd_dumb.pixel_format = DRM_FORMAT_RGB565;
+    cmd_dumb.handles[0] = create_dumb.handle;
+    cmd_dumb.handles[1] = create_dumb.handle;
+    cmd_dumb.pitches[0] = create_dumb.pitch;
+    cmd_dumb.pitches[1] = create_dumb.pitch;
+    // cmd_dumb.offsets[1] = 4;
+    printf("buffer pitch: %d = %d %d\n", create_dumb.pitch, cmd_dumb.pitches[0],
+           cmd_dumb.pitches[1]);
+    // cmd_dumb.bpp = create_dumb.bpp;
+    // cmd_dumb.pitch = create_dumb.pitch;
+    // cmd_dumb.depth = 24;
+    // cmd_dumb.handle = create_dumb.handle;
+    err = ioctl(dri_fd, DRM_IOCTL_MODE_ADDFB2, &cmd_dumb);
     if (err) {
       printf("Failed to add frame buffer, status = %d, status = %s\n", err,
              strerror(errno));
+      return err;
     }
 
     map_dumb.handle = create_dumb.handle;
@@ -195,13 +208,19 @@ int create_buffers(int dri_fd, struct drm_mode_modeinfo *conn_mode_buf,
       printf("Failed to set dumb buffer to dumb mode, status = %d, status = "
              "%s\n",
              err, strerror(errno));
+      return err;
     }
 
     printf("Created dumb buffer %d of %llu bytes\n", cmd_dumb.fb_id,
            create_dumb.size);
 
     buffer->ptr = mmap(0, create_dumb.size, PROT_READ | PROT_WRITE, MAP_SHARED,
-                      dri_fd, map_dumb.offset);
+                       dri_fd, map_dumb.offset);
+    printf("Offsets %d %d %d\n", cmd_dumb.offsets[0], cmd_dumb.offsets[1],
+           cmd_dumb.offsets[2]);
+    buffer->offsets[0] = cmd_dumb.offsets[0];
+    buffer->offsets[1] = cmd_dumb.offsets[1];
+    buffer->offsets[2] = cmd_dumb.offsets[2];
     buffer->size = create_dumb.size;
     buffer->width = create_dumb.width;
     buffer->height = create_dumb.height;
@@ -252,8 +271,8 @@ int drm_kms(int dri_fd, struct Screen *screens) {
     return -1;
   }
 
-//   printf("%s has %d connectors\n", DRI_CARD_PATH,
-//          card_resources.count_connectors);
+  //   printf("%s has %d connectors\n", DRI_CARD_PATH,
+  //          card_resources.count_connectors);
 
   int i;
   for (i = 0; i < card_resources.count_connectors; i++) {
@@ -274,7 +293,8 @@ int drm_kms(int dri_fd, struct Screen *screens) {
     screen->connector.prop_values_ptr = (uint64_t)conn_propval_buf;
     screen->connector.encoders_ptr = (uint64_t)conn_enc_buf;
 
-    printf("[#%d] Getting connector resource ids\n", screen->connector.connector_id);
+    printf("[#%d] Getting connector resource ids\n",
+           screen->connector.connector_id);
     err = ioctl(dri_fd, DRM_IOCTL_MODE_GETCONNECTOR,
                 &screen->connector); // get connector resource IDs
     if (err) {
@@ -282,7 +302,8 @@ int drm_kms(int dri_fd, struct Screen *screens) {
              strerror(errno));
     }
 
-    if (screen->connector.count_encoders < 1 || screen->connector.count_modes < 1 || !screen->connector.encoder_id ||
+    if (screen->connector.count_encoders < 1 ||
+        screen->connector.count_modes < 1 || !screen->connector.encoder_id ||
         !screen->connector.connection) {
       printf("[#%d] encoders: %d\tmodes: %d\n", screen->connector.connector_id,
              screen->connector.count_encoders, screen->connector.count_modes);

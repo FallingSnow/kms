@@ -32,9 +32,14 @@ struct Decoder {
   struct buffer_mp *buffers_mp_out;
   unsigned int n_buffers;
   unsigned int n_buffers_out;
+  void *source;
+  void *output;
 };
 
 int init_decoder(struct Decoder *decoder);
 int decode(struct Decoder *decoder, struct v4l2_buffer *buffer);
 int get_buffers(struct Decoder *decoder);
 int start_capturing(struct Decoder *decoder);
+void mainloop(struct Decoder *decoder);
+int run(struct Decoder *decoder);
+

@@ -4,7 +4,7 @@ LDFLAGS :=
 
 TARGETS:= decode
 MAINS  := $(addsuffix .o, $(TARGETS) )
-OBJ    := v4l2.o drm.o $(MAINS)
+OBJ    := v4l2.o drm.o util.o $(MAINS)
 DEPS   := 
 
 .PHONY: all clean

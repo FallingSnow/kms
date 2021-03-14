@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include <stdio.h>
 
+#include "util.h"
 #include "v4l2.h"
 #include <assert.h>
 #include <linux/videodev2.h>
@@ -15,7 +16,8 @@
  * -
  */
 
-FILE *in_fp;
+#define DEBUG(...) getenv("DEBUG") != NULL &&printf(__VA_ARGS__)
+
 unsigned long f_offset = 0;
 
 static int xioctl(int fh, int request, void *arg) {
@@ -28,29 +30,72 @@ static int xioctl(int fh, int request, void *arg) {
   return r;
 }
 
-static void process_image(const void *ptr, int size) {
-  printf("Writing %d bytes to output.\n", size);
-  // if (!out_fp)
-  //     out_fp = fopen(out_filename, "wb");
-  // if (out_fp)
-  //     fwrite(ptr, size, 1, out_fp);
+char *strstr_last(const char *str1, int len1, const char *str2, int len2) {
+  char *strp;
 
-  // fflush(stderr);
-  // fprintf(stderr, ".");
+  strp = (char *)(str1 + len1 - len2);
+  while (strp != str1) {
+    if (*strp == *str2) {
+      if (strncmp(strp, str2, len2) == 0)
+        return strp;
+    }
+    strp--;
+  }
+  return NULL;
 }
 
-static void process_image_mp(void *ptr[], unsigned int size[]) {
+// static void memcpy_nv12(__u8 *output, int size, const __u8 *ptr, __u32
+// uvoffset) {
+//   for (int i = 0; i < size; i += 1) {
+//     float y = ptr[i];
+//     float u = ptr[i + 1];
+//     float v = ptr[i + 2];
+//     output[i] = y + 1.13983 * v;
+//     output[i + 1] = y - 0.39465 * u - 0.58060 * v;
+//     output[i + 2] = y + 2.03211 * u;
+//     output[i + 3] = 0xFF;
+//     // output_idx += 4;
+//   }
+// }
+static void copy_nv12(__u8 *output, int size, const __u8 *ptr) {
+  struct perf_clock start, end;
+  // printf("Writing %d bytes to output buffer!\n", size);
+  // start = get_perf();
+  memcpy(output, ptr, size - 30720);
+  // end = get_perf();
+  // display_diff_perf(&start, &end);
+  // usleep(100000);
+  // memcpy(output + offsets[0], ptr, size / 2);
+  // memcpy(output + size / 2, ptr + size / 2, size / 4);
+  // memcpy(output + size / 2 + size / 4, ptr + size / 2 + size / 4, size / 4);
+}
+
+static void process_image(void *output, const void *ptr, int size) {
+  DEBUG("-- process_img(%p, %p, %d)\n", output, ptr, size);
+  // printf("Writing %d bytes to output.\n", size);
+  // memset(output, 0x00ffffff, size);
+  // memcpy_nv12_to_rgba(output, size, ptr);
+  // memcpy(output, ptr, size);
+  copy_nv12(output, size, ptr);
+  // *((uint32_t *)output+500) = ;
+  // fwrite(output, size, 1, out_fp);
+}
+
+static void process_image_mp(void *ptr[], unsigned int size[], void *output) {
   unsigned int p;
+  DEBUG("-- process_image_mp()\n");
 
   for (p = 0; p < FMT_NUM_PLANES; ++p)
-    process_image(ptr[p], size[p]);
+    process_image(output, ptr[p], size[p]);
 }
 
 static void supply_input(void *buf, unsigned int buf_len,
-                         unsigned int *bytesused) {
+                         unsigned int *bytesused, void *source) {
+  DEBUG("-- supply_input(%p, %d, %d, %p)\n", buf, buf_len, *bytesused, source);
+  FILE *in = (FILE *)source;
   unsigned char *buf_char = (unsigned char *)buf;
-  if (in_fp) {
-    *bytesused = fread(buf, 1, buf_len, in_fp);
+  if (in) {
+    *bytesused = fread(buf, 1, buf_len, in);
     if (*bytesused != buf_len)
       fprintf(stderr, "Short read %u instead of %u\n", *bytesused, buf_len);
     else
@@ -60,55 +105,68 @@ static void supply_input(void *buf, unsigned int buf_len,
 }
 
 static int supply_input_by_au(void *buf, size_t buf_len,
-                              unsigned int *bytesused) {
+                              unsigned int *bytesused, void *source) {
+  DEBUG("-- supply_input_by_au(%p, %zu, %d, %p)\n", buf, buf_len, *bytesused,
+        source);
+  FILE *in = (FILE *)source;
   unsigned char *buf_char = (unsigned char *)buf,
                 aud[4] = {0, 0, 0, 1}; // Start sequence for a h264 AUD,
                                        // denotes beginning of a single frame
   size_t au_length;
   void *b_offset;
 
-  if (-1 == fseek(in_fp, f_offset, SEEK_SET)) {
+  if (-1 == fseek(in, f_offset, SEEK_SET)) {
     fprintf(stderr, "Failed to seek in input file\n");
     return -1;
   }
-  *bytesused = fread(buf, 1, buf_len, in_fp);
-  f_offset += *bytesused;
+  // OPTIMIZE: We shouldn't reread, instead we should mask the data passed to
+  // the buffer. Maybe use a buffered reader?
+  *bytesused = fread(buf, 1, buf_len, in);
   if (*bytesused != buf_len) {
     printf("EOF of input reached\n");
+    return -1;
   }
 
-  printf("Searching for AUD in %p. [Buf: %p, read: %u]\n", in_fp, buf,
-         *bytesused);
-  printf("Used %u bytes. First 8 bytes %02x %02x %02x %02x\n", *bytesused,
-         buf_char[0], buf_char[1], buf_char[2], buf_char[3]);
+  // printf("Searching for AUD in %p. [Buf: %p, read: %u]\n", in_fp, buf,
+  //        *bytesused);
+  // printf("Used %u bytes. First 8 bytes %02x %02x %02x %02x\n", *bytesused,
+  //        buf_char[0], buf_char[1], buf_char[2], buf_char[3]);
 
-  // TODO: Upgrade memmem to https://github.com/mischasan/aho-corasick
+  // OPTIMIZE: Upgrade memmem to https://github.com/mischasan/aho-corasick
+  //
+  // Find the next Access Unit Delimiter (0x00000001) in the byte stream
   b_offset = memmem(buf + 1, *bytesused, aud, sizeof(aud) / sizeof(aud[0]));
+  // b_offset = strstr_last(buf + 1, *bytesused, (const char *)aud,
+  //                        sizeof(aud) / sizeof(aud[0]));
   if (b_offset == NULL) {
     fprintf(stderr, "Next AUD not found!\n");
     return 0;
   }
 
   au_length = b_offset - buf;
-  f_offset -= *bytesused - au_length;
 
   // Clear AUD
-  printf("AUD found at %lu, Setting %lu bytes to 0\n", f_offset, buf_len - au_length);
+  // printf("AUD found at %p, Setting %lu bytes to 0\n", b_offset,
+  //        buf_len - au_length);
   memset(b_offset, 0, *bytesused - au_length);
+  *bytesused = au_length;
+  f_offset += au_length + 1;
 
   return 0;
 }
 
 static void supply_input_mp(void *buf[], unsigned int buf_len[],
-                            unsigned int *bytesused) {
+                            unsigned int *bytesused, void *source) {
   unsigned int p;
   unsigned int tot_bytes = 0;
+  DEBUG("-- supply_input_mp(%p, %p, %d, %p)\n", buf, buf_len, *bytesused,
+        source);
 
   for (p = 0; p < FMT_NUM_PLANES; ++p) {
     unsigned int bytes;
-    printf("supply_input_mp p: %d, buffersize: %u\n", p, buf_len[p]);
-    supply_input_by_au(buf[p], buf_len[p], &bytes);
-    // supply_input(buf[p], buf_len[p], &bytes);
+    // printf("supply_input_mp p: %d, buffersize: %u\n", p, buf_len[p]);
+    supply_input_by_au(buf[p], buf_len[p], &bytes, source);
+    // supply_input(buf[p], buf_len[p], &bytes, source);
     tot_bytes += bytes;
   }
 
@@ -116,7 +174,11 @@ static void supply_input_mp(void *buf[], unsigned int buf_len[],
 }
 
 static int read_frame_mmap_mp(int deviceFd, enum v4l2_buf_type type,
-                              struct buffer_mp *bufs, unsigned int n_buffers) {
+                              struct buffer_mp *bufs, unsigned int n_buffers,
+                              void *target) {
+  DEBUG("-- read_frame_mmap_mp(%d, %s, %p, %d, %p)\n", deviceFd,
+        type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE ? "cap" : "out", bufs,
+        n_buffers, target);
   struct v4l2_buffer buf = {0};
   struct v4l2_plane planes[FMT_NUM_PLANES] = {0};
 
@@ -144,10 +206,10 @@ static int read_frame_mmap_mp(int deviceFd, enum v4l2_buf_type type,
   assert(buf.index < n_buffers);
 
   if (type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE)
-    process_image_mp(bufs[buf.index].start, bufs[buf.index].length);
+    process_image_mp(bufs[buf.index].start, bufs[buf.index].length, target);
   else
     supply_input_mp(bufs[buf.index].start, bufs[buf.index].length,
-                    &buf.bytesused);
+                    &buf.bytesused, target);
 
   if (-1 == xioctl(deviceFd, VIDIOC_QBUF, &buf)) {
     fprintf(stderr, "VIDIOC_QBUF failed, %s\n", strerror(errno));
@@ -158,7 +220,11 @@ static int read_frame_mmap_mp(int deviceFd, enum v4l2_buf_type type,
 }
 
 static int start_capturing_mmap_mp(int deviceFd, enum v4l2_buf_type type,
-                                   struct buffer_mp *bufs, size_t n_bufs) {
+                                   struct buffer_mp *bufs, size_t n_bufs,
+                                   void *source) {
+  DEBUG("-- start_capturing_mmap_mp(%d, %s, %p, %zu, %p)\n", deviceFd,
+        type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE ? "cap" : "out", bufs,
+        n_bufs, source);
   unsigned int i;
 
   for (i = 0; i < n_bufs; ++i) {
@@ -174,7 +240,7 @@ static int start_capturing_mmap_mp(int deviceFd, enum v4l2_buf_type type,
     buf.m.planes = planes;
 
     if (type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE)
-      supply_input_mp(bufs[i].start, bufs[i].length, &buf.bytesused);
+      supply_input_mp(bufs[i].start, bufs[i].length, &buf.bytesused, source);
 
     if (-1 == xioctl(deviceFd, VIDIOC_QBUF, &buf)) {
       fprintf(stderr, "Failed to queue buffer, %s\n", strerror(errno));
@@ -192,18 +258,20 @@ static int start_capturing_mmap_mp(int deviceFd, enum v4l2_buf_type type,
 int start_capturing(struct Decoder *decoder) {
   unsigned int i;
   int err;
+  DEBUG("-- start_capturing(output: %p, source: %p)\n", decoder->output,
+        decoder->source);
 
   printf("Starting to capture on capture planes\n");
-  err = start_capturing_mmap_mp(decoder->deviceFd,
-                                V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
-                                decoder->buffers_mp, decoder->n_buffers);
+  err = start_capturing_mmap_mp(
+      decoder->deviceFd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
+      decoder->buffers_mp, decoder->n_buffers, decoder->output);
   if (err)
     return err;
 
-  printf("Starting to capture on output planes\n");
+  printf("Starting to capture on output planes, file = %p\n", decoder->source);
   err = start_capturing_mmap_mp(
       decoder->deviceFd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
-      decoder->buffers_mp_out, decoder->n_buffers_out);
+      decoder->buffers_mp_out, decoder->n_buffers_out, decoder->source);
   if (err)
     return err;
 
@@ -217,7 +285,7 @@ static int init_mmap_mp(int deviceFd, enum v4l2_buf_type type,
   struct buffer_mp *bufs = {0};
   unsigned int b;
 
-  req.count = 4;
+  req.count = 1;
   req.type = type;
   req.memory = V4L2_MEMORY_MMAP;
 
@@ -226,12 +294,13 @@ static int init_mmap_mp(int deviceFd, enum v4l2_buf_type type,
     return -1;
   }
 
-  if (req.count < 2) {
-    fprintf(stderr, "Insufficient device memory\n");
-    return -1;
-  }
+  // if (req.count < 2) {
+  //   fprintf(stderr, "Insufficient device memory\n");
+  //   return -1;
+  // }
 
   bufs = calloc(req.count, sizeof(*bufs));
+  printf("Initilized %d v4l2 buffers\n", req.count);
 
   if (!bufs) {
     fprintf(stderr, "Out of memory\n");
@@ -295,12 +364,7 @@ static int init_device_out(struct Decoder *decoder) {
   format.fmt.pix_mp.width = 1920;
   format.fmt.pix_mp.height = 1080;
   format.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_H264;
-  format.fmt.pix_mp.field = V4L2_FIELD_NONE;
-
-  if (-1 == xioctl(decoder->deviceFd, VIDIOC_S_FMT, &format)) {
-    fprintf(stderr, "Failed VIDIOC_S_FMT, %s\n", strerror(errno));
-    return -1;
-  }
+  format.fmt.pix_mp.field = V4L2_FIELD_ANY;
 
   /* Buggy driver paranoia. */
   unsigned int p;
@@ -314,6 +378,11 @@ static int init_device_out(struct Decoder *decoder) {
     if (format.fmt.pix_mp.plane_fmt[p].sizeimage > 0 &&
         format.fmt.pix_mp.plane_fmt[p].sizeimage < min)
       format.fmt.pix_mp.plane_fmt[p].sizeimage = min;
+  }
+
+  if (-1 == xioctl(decoder->deviceFd, VIDIOC_S_FMT, &format)) {
+    fprintf(stderr, "Failed VIDIOC_S_FMT, %s\n", strerror(errno));
+    return -1;
   }
 
   init_mmap_mp(decoder->deviceFd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
@@ -336,112 +405,167 @@ static int init_device_out(struct Decoder *decoder) {
   return 0;
 }
 
-static void handle_event(struct Decoder *decoder) {
-  struct v4l2_event ev;
+void stop_capture(struct Decoder *decoder, enum v4l2_buf_type type) {
+  if (-1 == xioctl(decoder->deviceFd, VIDIOC_STREAMOFF, &type))
+    fprintf(stderr, "Failed VIDIOC_STREAMOFF, %s\n", strerror(errno));
+}
 
-  while (!ioctl(decoder->deviceFd, VIDIOC_DQEVENT, &ev)) {
+static void unmap_buffers_mp(struct buffer_mp *buf, unsigned int n) {
+  unsigned int b, p;
+
+  for (b = 0; b < n; b++)
+    for (p = 0; p < FMT_NUM_PLANES; p++)
+      if (-1 == munmap(buf[b].start[p], buf[b].length[p]))
+        fprintf(stderr, "Failed to unmap buffers, %s\n", strerror(errno));
+}
+
+static void free_buffers_mmap(struct Decoder *decoder,
+                              enum v4l2_buf_type type) {
+  struct v4l2_requestbuffers req = {0};
+
+  req.count = 0;
+  req.type = type;
+  req.memory = V4L2_MEMORY_MMAP;
+
+  if (-1 == xioctl(decoder->deviceFd, VIDIOC_REQBUFS, &req)) {
+    fprintf(stderr, "Failed VIDIOC_REQBUFS, %s\n", strerror(errno));
+  }
+}
+
+static int handle_event(struct Decoder *decoder) {
+  struct v4l2_event ev = {0};
+
+  do {
+    if (ioctl(decoder->deviceFd, VIDIOC_DQEVENT, &ev) == -1) {
+      fprintf(stderr, "Failed VIDIOC_REQBUFS, %s\n", strerror(errno));
+      return -1;
+    }
     switch (ev.type) {
     case V4L2_EVENT_SOURCE_CHANGE:
       printf("Source changed\n");
 
-      // stop_capture(V4L2_BUF_TYPE_VIDEO_CAPTURE);
+      stop_capture(decoder, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
 
-      // unmap_buffers_mp(decoder->buffers_mp, decoder->n_buffers);
+      unmap_buffers_mp(decoder->buffers_mp, decoder->n_buffers);
 
-      // printf("Unmapped all buffers\n");
+      printf("Unmapped all buffers\n");
 
-      // free_buffers_mmap(V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
+      free_buffers_mmap(decoder, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
 
-      // init_mmap_mp(V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, &decoder->buffers_mp,
-      // &decoder->n_buffers);
+      init_mmap_mp(decoder->deviceFd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
+                   &decoder->buffers_mp, &decoder->n_buffers);
 
-      // start_capturing_mmap_mp(V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
-      // decoder->buffers_mp,
-      //                         decoder->n_buffers);
+      start_capturing_mmap_mp(
+          decoder->deviceFd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
+          decoder->buffers_mp, decoder->n_buffers, decoder->output);
       break;
     case V4L2_EVENT_EOS:
       fprintf(stderr, "EOS\n");
-      break;
+      return 1;
     }
-  }
+  } while (ev.pending > 0);
+
+  return 0;
 }
 
-static void mainloop(struct Decoder *decoder) {
-  unsigned int count;
-
-  while (true) {
-    for (;;) {
-      fd_set fds[3];
-      fd_set *rd_fds = &fds[0]; /* for capture */
-      fd_set *ex_fds = &fds[1]; /* for capture */
-      fd_set *wr_fds = &fds[2]; /* for output */
-      struct timeval tv;
-      int r;
-
-      if (rd_fds) {
-        FD_ZERO(rd_fds);
-        FD_SET(decoder->deviceFd, rd_fds);
-      }
-
-      if (ex_fds) {
-        FD_ZERO(ex_fds);
-        FD_SET(decoder->deviceFd, ex_fds);
-      }
-
-      if (wr_fds) {
-        FD_ZERO(wr_fds);
-        FD_SET(decoder->deviceFd, wr_fds);
-      }
-
-      /* Timeout. */
-      tv.tv_sec = 10;
-      tv.tv_usec = 0;
-
-      r = select(decoder->deviceFd + 1, rd_fds, wr_fds, ex_fds, &tv);
-
-      if (-1 == r) {
-        if (EINTR == errno)
-          continue;
-        fprintf(stderr, "Select failed, %s\n", strerror(errno));
-        return;
-      }
-
-      if (0 == r) {
-        printf("select timeout\n");
-        return;
-      }
-
-      if (rd_fds && FD_ISSET(decoder->deviceFd, rd_fds)) {
-        printf("Reading\n");
-        int read = read_frame_mmap_mp(decoder->deviceFd,
-                                      V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
-                                      decoder->buffers_mp, decoder->n_buffers);
-        if (read > 0)
-          break;
-        else if (read < 0) {
-          fprintf(stderr, "Writing failed\n");
-          return;
-        }
-      }
-      if (wr_fds && FD_ISSET(decoder->deviceFd, wr_fds)) {
-        fprintf(stderr, "Writing\n");
-        int read = read_frame_mmap_mp(
-            decoder->deviceFd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
-            decoder->buffers_mp_out, decoder->n_buffers_out);
-        if (read > 0)
-          break;
-        else if (read < 0) {
-          fprintf(stderr, "Writing failed\n");
-          return;
-        }
-      }
-      if (ex_fds && FD_ISSET(decoder->deviceFd, ex_fds)) {
-        fprintf(stderr, "Exception\n");
-        handle_event(decoder);
-      }
-      /* EAGAIN - continue select loop. */
-    }
+int v4l2_write(struct Decoder *decoder) {
+  int read = read_frame_mmap_mp(
+      decoder->deviceFd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
+      decoder->buffers_mp_out, decoder->n_buffers_out, decoder->source);
+  if (read > 0)
+    return 0;
+  else if (read < 0) {
+    fprintf(stderr, "Writing failed\n");
+    return -1;
   }
+  return 0;
+}
+int v4l2_read(struct Decoder *decoder) {
+  int read = read_frame_mmap_mp(
+      decoder->deviceFd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
+      decoder->buffers_mp, decoder->n_buffers, decoder->output);
+  if (read > 0)
+    return 0;
+  else if (read < 0) {
+    fprintf(stderr, "Reading failed\n");
+    return -1;
+  }
+  return 0;
+}
+
+int run(struct Decoder *decoder) {
+  fd_set fds[3];
+  fd_set *rd_fds = &fds[0]; /* for capture */
+  fd_set *ex_fds = &fds[1]; /* for capture */
+  fd_set *wr_fds = &fds[2]; /* for output */
+  struct timeval tv;
+  int r;
+
+  if (rd_fds) {
+    FD_ZERO(rd_fds);
+    FD_SET(decoder->deviceFd, rd_fds);
+  }
+
+  if (ex_fds) {
+    FD_ZERO(ex_fds);
+    FD_SET(decoder->deviceFd, ex_fds);
+  }
+
+  if (wr_fds) {
+    FD_ZERO(wr_fds);
+    FD_SET(decoder->deviceFd, wr_fds);
+  }
+
+  /* Timeout. */
+  tv.tv_sec = 10;
+  tv.tv_usec = 0;
+
+  r = select(decoder->deviceFd + 1, rd_fds, wr_fds, ex_fds, &tv);
+
+  if (-1 == r) {
+    if (EINTR == errno)
+      return 0;
+    fprintf(stderr, "Select failed, %s\n", strerror(errno));
+    return -1;
+  }
+
+  if (0 == r) {
+    printf("select timeout\n");
+    return -1;
+  }
+
+  if (rd_fds && FD_ISSET(decoder->deviceFd, rd_fds)) {
+    // printf("Reading\n");
+    if (v4l2_read(decoder) == -1) {
+      return -1;
+    };
+    return 1;
+  }
+  if (wr_fds && FD_ISSET(decoder->deviceFd, wr_fds)) {
+    // printf("Writing\n");
+    if (v4l2_write(decoder) == -1) {
+      return -1;
+    };
+    return 2;
+  }
+  if (ex_fds && FD_ISSET(decoder->deviceFd, ex_fds)) {
+    fprintf(stderr, "Exception\n");
+    if (handle_event(decoder)) {
+      return -1;
+    }
+    printf("Event handled\n");
+  }
+  return 0;
+}
+
+void mainloop(struct Decoder *decoder) {
+  printf("Entered main loop\n");
+
+  // while (true) {
+  //   if (run(decoder) < 0) {
+  //     return;
+  //   }
+  // }
 }
 
 //------------------------------------------------------------------------------
@@ -455,12 +579,6 @@ int init_decoder(struct Decoder *decoder) {
   struct v4l2_streamparm streamparm = {0};
   int err;
   unsigned int min;
-
-  in_fp = fopen("/home/alarm/jellyfish-15-mbps-hd-h264.h264", "rb");
-  if (in_fp == NULL) {
-    printf("Failed to open input video");
-    return -1;
-  }
 
   deviceFd = open(DEV_PATH, O_RDWR);
   if (deviceFd < 0) {
@@ -486,31 +604,33 @@ int init_decoder(struct Decoder *decoder) {
     return -1;
   }
 
+  // Set output format
   format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
   format.fmt.pix_mp.width = 1920;
   format.fmt.pix_mp.height = 1080;
-  format.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_NV12;
-  format.fmt.pix_mp.field = V4L2_FIELD_ANY;
+  format.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_RGB565;
+  // format.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_YUV420;
+  // format.fmt.pix_mp.pixelformat = V4L2_PIX_FMT_NV12;
+  format.fmt.pix_mp.field = V4L2_FIELD_NONE;
+
+  /* Buggy driver paranoia. */
+  unsigned int p;
+  for (p = 0; p < FMT_NUM_PLANES; ++p) {
+    min = format.fmt.pix_mp.width * 2;
+    if (format.fmt.pix_mp.plane_fmt[p].bytesperline > 0 &&
+        format.fmt.pix_mp.plane_fmt[p].bytesperline < min)
+      format.fmt.pix_mp.plane_fmt[p].bytesperline = min;
+    min =
+        format.fmt.pix_mp.plane_fmt[p].bytesperline * format.fmt.pix_mp.height;
+    if (format.fmt.pix_mp.plane_fmt[p].sizeimage > 0 &&
+        format.fmt.pix_mp.plane_fmt[p].sizeimage < min)
+      format.fmt.pix_mp.plane_fmt[p].sizeimage = min;
+  }
 
   if (xioctl(deviceFd, VIDIOC_S_FMT, &format) < 0) {
     fprintf(stderr, "Unable to set format, %s\n", strerror(errno));
     return -1;
   }
-
-  // /* Buggy driver paranoia. */
-  // unsigned int p;
-  // for (p = 0; p < FMT_NUM_PLANES; ++p) {
-  //   min = format.fmt.pix_mp.width * 2;
-  //   if (format.fmt.pix_mp.plane_fmt[p].bytesperline > 0 &&
-  //       format.fmt.pix_mp.plane_fmt[p].bytesperline < min)
-  //     format.fmt.pix_mp.plane_fmt[p].bytesperline = min;
-  //   min =
-  //       format.fmt.pix_mp.plane_fmt[p].bytesperline *
-  //       format.fmt.pix_mp.height;
-  //   if (format.fmt.pix_mp.plane_fmt[p].sizeimage > 0 &&
-  //       format.fmt.pix_mp.plane_fmt[p].sizeimage < min)
-  //     format.fmt.pix_mp.plane_fmt[p].sizeimage = min;
-  // }
 
   init_mmap_mp(deviceFd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
                &decoder->buffers_mp, &decoder->n_buffers);
@@ -518,146 +638,6 @@ int init_decoder(struct Decoder *decoder) {
   if (capability.capabilities &
       (V4L2_CAP_VIDEO_M2M | V4L2_CAP_VIDEO_M2M_MPLANE)) {
     init_device_out(decoder);
-  }
-
-  return 0;
-}
-
-int decode(struct Decoder *decoder, struct v4l2_buffer *buffer) { return 0; }
-
-//------------------------------------------------------------------------------
-// Queue Buffer
-//------------------------------------------------------------------------------
-
-// https://modelingwithdata.org/arch/00000022.htm
-// These are the parameters you can pass the queue_buffer
-typedef struct {
-  struct Decoder *decoder;
-  struct v4l2_buffer *buffer;
-  enum v4l2_buf_type type;
-} queue_buffer_args;
-
-// The actual qeue_buffer function
-int queue_buffer_base(struct Decoder *decoder, struct v4l2_buffer *buffer) {
-
-  // Queues buffer for decoding.
-  if (-1 == xioctl(decoder->deviceFd, VIDIOC_QBUF, buffer)) {
-    fprintf(stderr, "Unable to queue buffer, %s\n", strerror(errno));
-    return -1;
-  }
-
-  return 0;
-}
-
-// Setup default parameters
-struct v4l2_buffer *_queue_buffer_base(queue_buffer_args args) {
-  // If we weren't passed a buffer we need to create one
-  bool created = false;
-  if (!args.buffer) {
-    args.buffer = calloc(1, sizeof(struct v4l2_buffer));
-    args.buffer->type = args.type ? args.type : V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    args.buffer->memory = V4L2_MEMORY_MMAP;
-    created = true;
-  }
-  int result = queue_buffer_base(args.decoder, args.buffer);
-  if (result < 0 && created) {
-    free(args.buffer);
-  }
-  return args.buffer;
-}
-
-// Define the function that is called
-#define queue_buffer(...) _queue_buffer_base((queue_buffer_args){__VA_ARGS__});
-
-//------------------------------------------------------------------------------
-// Dequeue Buffer
-//------------------------------------------------------------------------------
-
-typedef struct {
-  struct Decoder *decoder;
-  struct v4l2_buffer *buffer;
-} dequeue_buffer_args;
-
-int dequeue_buffer_base(struct Decoder *decoder, struct v4l2_buffer *buffer) {
-
-  if (-1 == xioctl(decoder->deviceFd, VIDIOC_DQBUF, buffer)) {
-    fprintf(stderr, "Unable to dequeue buffer, %s\n", strerror(errno));
-    return -1;
-  }
-
-  return 0;
-}
-
-// Setup default parameters
-struct v4l2_buffer *_dequeue_buffer_base(queue_buffer_args args) {
-  // If we weren't passed a buffer we need to create one
-  bool created = false;
-  if (!args.buffer) {
-    args.buffer = calloc(1, sizeof(struct v4l2_buffer));
-    args.buffer->type = args.type ? args.type : V4L2_BUF_TYPE_VIDEO_OUTPUT;
-    args.buffer->memory = V4L2_MEMORY_MMAP;
-    created = true;
-  }
-  int result = dequeue_buffer_base(args.decoder, args.buffer);
-  if (result < 0 && created) {
-    free(args.buffer);
-  }
-  return args.buffer;
-}
-
-// Define the function that is called
-#define dequeue_buffer(...)                                                    \
-  _dequeue_buffer_base((queue_buffer_args){__VA_ARGS__});
-
-//------------------------------------------------------------------------------
-// Request Buffers from device
-//------------------------------------------------------------------------------
-
-int get_buffers(struct Decoder *decoder) {
-  int count = 2;
-
-  // Request some buffers on the device
-  struct v4l2_requestbuffers req = {
-      .count = count, .type = V4L2_BUFFER_TYPE, .memory = V4L2_MEMORY_MMAP, 0};
-
-  // Make the request
-  if (-1 == xioctl(decoder->deviceFd, VIDIOC_REQBUFS, &req)) {
-    fprintf(stderr, "Could not request buffers, %s\n", strerror(errno));
-    return -1;
-  }
-
-  // Check if we received less buffers than we asked for
-  if (req.count < count) {
-    fprintf(stderr, "Insufficient device buffer memory\n");
-    return -1;
-  }
-
-  // For each buffer on the device, we are going to mmap it so we can access it
-  // from userspace
-  for (size_t idx = 0; idx < req.count; idx++) {
-    struct v4l2_buffer v4l2_buffer = {0};
-    struct v4l2_plane planes[2] = {0};
-
-    v4l2_buffer.type = V4L2_BUFFER_TYPE;
-    v4l2_buffer.memory = V4L2_MEMORY_MMAP;
-    v4l2_buffer.index = idx;
-    v4l2_buffer.m.planes = planes;
-    v4l2_buffer.length = 2;
-
-    if (-1 == xioctl(decoder->deviceFd, VIDIOC_QUERYBUF, &v4l2_buffer)) {
-      fprintf(stderr, "Unable to query buffer %zu, %s\n", idx, strerror(errno));
-      return -1;
-    }
-
-    decoder->buffers[idx].length = v4l2_buffer.length;
-    decoder->buffers[idx].ptr =
-        mmap(NULL, v4l2_buffer.length, PROT_READ | PROT_WRITE, MAP_SHARED,
-             decoder->deviceFd, v4l2_buffer.m.offset);
-
-    if (decoder->buffers[idx].ptr == MAP_FAILED) {
-      fprintf(stderr, "Could not mmap buffer %zu\n", idx);
-      return -1;
-    }
   }
 
   return 0;
