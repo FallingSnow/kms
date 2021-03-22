@@ -1,8 +1,10 @@
 #include <stdio.h>
+#include <sys/ioctl.h>
+#include <errno.h>
 
 #include "util.h"
 
-struct perf_clock get_perf() {
+inline struct perf_clock get_perf() {
   struct timespec current_time = {0};
   clock_gettime(0, &current_time);
   struct perf_clock perf = {
@@ -19,7 +21,7 @@ struct perf_clock get_perf() {
  * @param b the subtrahend
  * @param result a - b
  */
-static inline void timespec_diff(struct timespec *a, struct timespec *b,
+inline void timespec_diff(struct timespec *a, struct timespec *b,
                                  struct timespec *result) {
   result->tv_sec = a->tv_sec - b->tv_sec;
   result->tv_nsec = a->tv_nsec - b->tv_nsec;
@@ -38,4 +40,14 @@ void display_diff_perf(struct perf_clock *start, struct perf_clock *end) {
 
   printf("[Lower is Better] Time: %fms\tPerformance: %fms\n", datetime_diff_ms,
          runtime_diff_ms);
+}
+
+int xioctl(int fh, int request, void *arg) {
+  int r;
+
+  do {
+    r = ioctl(fh, request, arg);
+  } while (-1 == r && EINTR == errno);
+
+  return r;
 }

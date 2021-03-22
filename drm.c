@@ -4,9 +4,9 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+// #include <asm-generic/fcntl.h>
 
 #include "drm.h"
-
 
 // OPTIMIZE: Map the dumb buffer to a frame buffer
 // https://www.systutorials.com/docs/linux/man/7-drm-memory/
@@ -47,7 +47,7 @@ static int vsync_drm_wait(int drm_fd) {
 
 bool drm_swap_buffers_page_flip(int dri_fd, struct Framebuffer *fb,
                                 struct drm_mode_crtc *crtc) {
-    // printf("Flipping page\n");
+  // printf("Flipping page\n");
   struct drm_mode_crtc_page_flip_target flip_target = {0};
   int err = 0;
 
@@ -162,8 +162,8 @@ int create_buffers(int dri_fd, struct drm_mode_modeinfo *conn_mode_buf,
   // during after a vblank.
 
   struct drm_mode_create_dumb create_dumb = {0};
-  struct drm_mode_map_dumb map_dumb = {0};
   struct drm_mode_fb_cmd2 cmd_dumb = {0};
+  struct drm_prime_handle prime = {0};
   int err;
 
   for (int b = 0; b < NUM_BUFFERS; b++) {
@@ -173,7 +173,12 @@ int create_buffers(int dri_fd, struct drm_mode_modeinfo *conn_mode_buf,
     // find a valid crtc with modes.
     create_dumb.width = conn_mode_buf->hdisplay;
     create_dumb.height = conn_mode_buf->vdisplay;
-    create_dumb.bpp = 16;
+    // TODO: Find out why v4l2 and drm disagree about what size the buffer
+    // should be
+    //
+    // This should really be 16, but v4l2 wants a buffer larger that
+    // create_dumb with 16 provides
+    create_dumb.bpp = 17;
     err = ioctl(dri_fd, DRM_IOCTL_MODE_CREATE_DUMB, &create_dumb);
     if (err) {
       printf("Failed to create dumb buffer, status = %d, status = %s\n", err,
@@ -185,9 +190,7 @@ int create_buffers(int dri_fd, struct drm_mode_modeinfo *conn_mode_buf,
     cmd_dumb.height = create_dumb.height;
     cmd_dumb.pixel_format = DRM_FORMAT_RGB565;
     cmd_dumb.handles[0] = create_dumb.handle;
-    cmd_dumb.handles[1] = create_dumb.handle;
     cmd_dumb.pitches[0] = create_dumb.pitch;
-    cmd_dumb.pitches[1] = create_dumb.pitch;
     // cmd_dumb.offsets[1] = 4;
     printf("buffer pitch: %d = %d %d\n", create_dumb.pitch, cmd_dumb.pitches[0],
            cmd_dumb.pitches[1]);
@@ -202,29 +205,31 @@ int create_buffers(int dri_fd, struct drm_mode_modeinfo *conn_mode_buf,
       return err;
     }
 
-    map_dumb.handle = create_dumb.handle;
-    err = ioctl(dri_fd, DRM_IOCTL_MODE_MAP_DUMB, &map_dumb);
-    if (err) {
-      printf("Failed to set dumb buffer to dumb mode, status = %d, status = "
-             "%s\n",
-             err, strerror(errno));
-      return err;
-    }
-
     printf("Created dumb buffer %d of %llu bytes\n", cmd_dumb.fb_id,
            create_dumb.size);
 
-    buffer->ptr = mmap(0, create_dumb.size, PROT_READ | PROT_WRITE, MAP_SHARED,
-                       dri_fd, map_dumb.offset);
-    printf("Offsets %d %d %d\n", cmd_dumb.offsets[0], cmd_dumb.offsets[1],
-           cmd_dumb.offsets[2]);
+    // printf("Offsets %d %d %d\n", cmd_dumb.offsets[0], cmd_dumb.offsets[1],
+    //        cmd_dumb.offsets[2]);
     buffer->offsets[0] = cmd_dumb.offsets[0];
-    buffer->offsets[1] = cmd_dumb.offsets[1];
-    buffer->offsets[2] = cmd_dumb.offsets[2];
     buffer->size = create_dumb.size;
     buffer->width = create_dumb.width;
     buffer->height = create_dumb.height;
     buffer->id = cmd_dumb.fb_id;
+
+    prime.handle = create_dumb.handle;
+    // prime.flags = DRM_CLOEXEC | DRM_RDWR;
+    err = ioctl(dri_fd, DRM_IOCTL_PRIME_HANDLE_TO_FD, &prime);
+    if (err) {
+      printf(
+          "Failed to create prime file descriptor, status = %d, status = %s\n",
+          err, strerror(errno));
+      return err;
+    }
+
+    // printf("Got prime FD %d\n", prime.fd);
+
+    // Allocate buffer wrappers for v4l2
+    buffer->fds[0] = prime.fd;
   }
 
   return 0;

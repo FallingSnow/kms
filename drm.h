@@ -8,7 +8,7 @@
 
 struct Framebuffer {
   __u32 offsets[4];
-  void *ptr;
+  __s32 fds[4];
   uint64_t size;
   long width;
   long height;
