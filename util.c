@@ -4,7 +4,7 @@
 
 #include "util.h"
 
-inline struct perf_clock get_perf() {
+struct perf_clock get_perf() {
   struct timespec current_time = {0};
   clock_gettime(0, &current_time);
   struct perf_clock perf = {
@@ -21,7 +21,7 @@ inline struct perf_clock get_perf() {
  * @param b the subtrahend
  * @param result a - b
  */
-inline void timespec_diff(struct timespec *a, struct timespec *b,
+void timespec_diff(struct timespec *a, struct timespec *b,
                                  struct timespec *result) {
   result->tv_sec = a->tv_sec - b->tv_sec;
   result->tv_nsec = a->tv_nsec - b->tv_nsec;
@@ -31,14 +31,14 @@ inline void timespec_diff(struct timespec *a, struct timespec *b,
   }
 }
 
-void display_diff_perf(struct perf_clock *start, struct perf_clock *end) {
+void display_diff_perf(struct perf_clock *start, struct perf_clock *end, char *label) {
   struct timespec diff = {0};
   timespec_diff(&end->time, &start->time, &diff);
 
   double datetime_diff_ms = diff.tv_sec * 1000 + (float)diff.tv_nsec / 1000000;
   double runtime_diff_ms = (end->clock - start->clock) * 1000. / CLOCKS_PER_SEC;
 
-  printf("[Lower is Better] Time: %fms\tPerformance: %fms\n", datetime_diff_ms,
+  printf("%s: Time: %fms\tPerformance: %fms\n", label, datetime_diff_ms,
          runtime_diff_ms);
 }
 

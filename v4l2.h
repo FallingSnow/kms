@@ -13,7 +13,7 @@
 
 #define DEV_PATH "/dev/video10"
 #define FMT_NUM_PLANES 1
-#define MAX_EVENTS 1
+#define MAX_EVENTS 4
 
 struct buffer {
   void *ptr;
@@ -48,7 +48,7 @@ int get_buffers(int drm_fd, struct buffer_mp *buffers, int n_buffers,
                 enum v4l2_buf_type type);
 int start_stream(int drm_fd, enum v4l2_buf_type);
 int create_epoller(int drm_fd);
-int epoll_events(int poller_fd);
+int epoll_events(int poller_fd, struct epoll_event pevents[MAX_EVENTS]);
 int v4l2_select(int drm_fd);
 int read_h264_au(void *buf, size_t buf_len, FILE *in, size_t f_offset);
 

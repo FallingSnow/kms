@@ -68,7 +68,7 @@ int queue_buffer(int drm_fd, struct v4l2_buffer *buffer) {
 
 int dequeue_buffer(int drm_fd, struct v4l2_buffer *buffer) {
 
-  if (-1 == xioctl(drm_fd, VIDIOC_DQBUF, &buffer)) {
+  if (-1 == xioctl(drm_fd, VIDIOC_DQBUF, buffer)) {
     switch (errno) {
     case EAGAIN:
       return 0;
@@ -143,11 +143,11 @@ int get_buffers(int drm_fd, struct buffer_mp *buffers, int n_buffers,
       return -1;
     }
 
-    printf(
-        "[%zu] Buffer: idx: %d, type: %d, bytesused: %d, flags: %d, field: "
-        "%d, memory: %d, len: %d, request_fd: %d, m.planes: %p\n",
-        idx, buffer.index, buffer.type, buffer.bytesused, buffer.flags,
-        buffer.field, buffer.memory, buffer.length, buffer.request_fd, buffer.m.planes);
+    printf("[%zu] Buffer: idx: %d, type: %d, bytesused: %d, flags: %d, field: "
+           "%d, memory: %d, len: %d, request_fd: %d, m.planes: %p\n",
+           idx, buffer.index, buffer.type, buffer.bytesused, buffer.flags,
+           buffer.field, buffer.memory, buffer.length, buffer.request_fd,
+           buffer.m.planes);
 
     if (V4L2_TYPE_IS_MULTIPLANAR(type))
       for (int i = 0; i < FMT_NUM_PLANES; i++) {
@@ -313,7 +313,7 @@ int create_epoller(int drm_fd) {
     return -1;
   }
 
-  ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
+  ev.events = EPOLLIN | EPOLLOUT | EPOLLET | EPOLLPRI;
   ev.data.fd = drm_fd;
 
   if (epoll_ctl(polling_fd, EPOLL_CTL_ADD, drm_fd, &ev) != 0) {
@@ -349,11 +349,11 @@ static int handle_event(drm_fd) {
   return 0;
 }
 
-int epoll_events(int poller_fd) {
-  struct epoll_event pevents[MAX_EVENTS] = {0};
-  // printf("EPOLL waiting for poller %d\n", poller->fd);
+int epoll_events(int poller_fd, struct epoll_event pevents[MAX_EVENTS]) {
+  bzero(pevents, sizeof(*pevents));
+  // printf("EPOLL waiting for poller %d\n", poller_fd);
   int ready = epoll_wait(poller_fd, pevents, MAX_EVENTS, 10000);
-  printf("Num events %d\n", ready);
+  // printf("Num events %d\n", ready);
 
   // Check if epoll actually succeeded
   if (ready == -1) {
@@ -366,20 +366,17 @@ int epoll_events(int poller_fd) {
     return -1;
   }
 
+  return ready;
+
   // Check if any events detected
   for (int i = 0; i < ready; i++) {
-    printf("Poll event %d: %d\n", i, pevents[i].events);
-    if (pevents[i].events & EPOLLIN) {
-      return 1;
-    }
-    if (pevents[i].events & EPOLLOUT) {
-      return 2;
-    }
-    if (pevents[i].events & EPOLLERR) {
-      fprintf(stderr, "epoll event error\n");
-      return handle_event(pevents[i].data.fd);
-    }
-    printf("Unhandled poll event %d\n", pevents[i].events);
+    // printf("Poll event %d: %d\n", i, pevents[i].events);
+    // TODO: Handle events
+    // if (pevents[i].events & EPOLLERR) {
+    //   fprintf(stderr, "epoll event error\n");
+    //   return handle_event(pevents[i].data.fd);
+    // }
+    // printf("Unhandled poll event %d\n", pevents[i].events);
   }
 
   return 0;
@@ -427,11 +424,11 @@ int v4l2_select(int drm_fd) {
   }
 
   if (rd_fds && FD_ISSET(drm_fd, rd_fds)) {
-    printf("Reading!\n");
+    // printf("Reading!\n");
     return 1;
   }
   if (wr_fds && FD_ISSET(drm_fd, wr_fds)) {
-    printf("Writing!\n");
+    // printf("Writing!\n");
     return 2;
   }
   if (ex_fds && FD_ISSET(drm_fd, ex_fds)) {
@@ -448,10 +445,11 @@ int v4l2_select(int drm_fd) {
 // Read a Access Unit delimited by Access Unit Delemeters from a file
 //------------------------------------------------------------------------------
 int read_h264_au(void *buf, size_t buf_len, FILE *in, size_t f_offset) {
-  unsigned char aud[4] = {0, 0, 0, 1}; // Start sequence for a h264 AUD,
-                                       // denotes beginning of a single frame
+  const char aud[4] = {0, 0, 0, 1}; // Start sequence for a h264 AUD,
+                                    // denotes beginning of a single frame
   size_t au_length, bytesused;
   void *b_offset;
+  struct perf_clock start, end;
 
   if (-1 == fseek(in, f_offset, SEEK_SET)) {
     fprintf(stderr, "Failed to seek in input file\n");
@@ -459,7 +457,10 @@ int read_h264_au(void *buf, size_t buf_len, FILE *in, size_t f_offset) {
   }
   // OPTIMIZE: We shouldn't reread, instead we should mask the data passed to
   // the buffer. Maybe use a buffered reader?
+  start = get_perf();
   bytesused = fread(buf, 1, buf_len, in);
+  end = get_perf();
+  display_diff_perf(&start, &end, "Read Input");
   if (bytesused != buf_len) {
     printf("EOF of input reached\n");
     return -1;
@@ -473,20 +474,25 @@ int read_h264_au(void *buf, size_t buf_len, FILE *in, size_t f_offset) {
   // OPTIMIZE: Upgrade memmem to https://github.com/mischasan/aho-corasick
   //
   // Find the next Access Unit Delimiter (0x00000001) in the byte stream
+  start = get_perf();
   b_offset = memmem(buf + 1, bytesused, aud, sizeof(aud) / sizeof(aud[0]));
+  end = get_perf();
+  display_diff_perf(&start, &end, "Find AUD");
   // b_offset = strstr_last(buf + 1, *bytesused, (const char *)aud,
   //                        sizeof(aud) / sizeof(aud[0]));
-  if (b_offset == NULL) {
-    fprintf(stderr, "Next AUD not found!\n");
-    return 0;
-  }
 
-  au_length = b_offset - buf;
+  if (b_offset == NULL) {
+    au_length = buf_len;
+    // fprintf(stderr, "Next AUD not found!\n");
+    // return 0;
+  } else {
+    au_length = b_offset - buf;
+    memset(b_offset, 0, bytesused - au_length);
+  }
 
   // Clear AUD
   // printf("AUD found at %p, Setting %lu bytes to 0\n", b_offset,
   //        buf_len - au_length);
-  memset(b_offset, 0, bytesused - au_length);
   bytesused = au_length;
   f_offset += au_length + 1;
 

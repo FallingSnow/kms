@@ -22,6 +22,7 @@
 // The raspberry pi tends to switch between card0 and card1 for the rendering
 // interface
 #define DRI_CARD_PATH "/dev/dri/card0"
+#define NUM_OUTPUT_BUFFERS 5
 
 int read_into_buffer(void *buf, int buf_len, FILE *in_fp, int *in_offset) {
   int bytesused = read_h264_au(buf, buf_len, in_fp, *in_offset);
@@ -29,7 +30,7 @@ int read_into_buffer(void *buf, int buf_len, FILE *in_fp, int *in_offset) {
     fprintf(stderr, "Unable to read h264 au\n");
     return -1;
   }
-  printf("Read %d bytes into the input buffer\n", bytesused);
+  // printf("Read %d bytes into the input buffer\n", bytesused);
   *in_offset += bytesused;
 
   return bytesused;
@@ -62,7 +63,8 @@ int buffer_dequeue_mp(int drm_fd, struct v4l2_buffer *buffer) {
 int main() {
   int err = 0, dri_fd = 0, in_offset = 0;
   FILE *in_fp;
-  struct Screen screens[10] = {0};
+  struct Framebuffer fbs[NUM_OUTPUT_BUFFERS] = {0};
+  struct Screen screens[1] = {{.buffers = fbs, .num_buffers = NUM_OUTPUT_BUFFERS}};
   // struct Decoder decoder = {0};
   struct perf_clock start, end;
   struct v4l2_plane planes[FMT_NUM_PLANES] = {0};
@@ -88,11 +90,6 @@ int main() {
     fprintf(stderr, "Failed to initialize drm kms, status = %d\n", err);
     return -1;
   }
-  for (int s = 0; s < 10; s++) {
-    if (screens[s].buffers[0].fds[0] != 0) {
-      printf("Got a screen with a fb\n");
-    }
-  }
 
   for (int i = 0; i < 1; i++) {
     printf("Connector ID: %d\n", screens[i].connector.connector_id);
@@ -106,8 +103,11 @@ int main() {
   // Framebuffer rendering
   //------------------------------------------------------------------------------
 
-  // in_fp = fopen("/home/alarm/FPS_test_1080p60_L4.2.h264", "rb");
-  in_fp = fopen("/home/alarm/jellyfish-15-mbps-hd-h264.h264", "rb");
+  in_fp = fopen("/home/alarm/FPS_test_1080p60_L4.2.h264", "rb");
+  // in_fp = fopen("/home/alarm/jellyfish-15-mbps-hd-h264.h264", "rb");
+  // in_fp = fopen("/home/alarm/jellyfish-15-mbps-hd-h264.h264", "rb");
+  // in_fp = fopen("/home/alarm/jellyfish-80-mbps-hd-h264.h254", "rb");
+  // in_fp = fopen("/home/alarm/jellyfish-20-mbps-4k-uhd-h264-444.h264", "rb");
   if (in_fp == NULL) {
     fprintf(stderr, "Failed to open input video\n");
     return -1;
@@ -119,10 +119,14 @@ int main() {
     return -1;
   }
 
-  struct buffer_mp in_buffers[1] = {0};
-  struct buffer_mp out_buffers[2] = {
-      {.fds = {screens[0].buffers[0].fds[0]}, 0},
-      {.fds = {screens[0].buffers[1].fds[0]}, 0}};
+  struct buffer_mp in_buffers[NUM_OUTPUT_BUFFERS] = {0};
+  struct buffer_mp out_buffers[screens[0].num_buffers];
+  bzero(&out_buffers, sizeof(out_buffers));
+
+  // Link buffer_mps to screen buffers
+  for (int i = 0; i < screens[0].num_buffers; i++) {
+    out_buffers[i].fds[0] = screens[0].buffers[i].fds[0];
+  }
 
   /**
    * Enqueue output buffer(s)
@@ -175,7 +179,7 @@ int main() {
   for (int idx = 0; idx < sizeof(in_buffers) / sizeof(in_buffers[0]); idx++) {
 
     printf("Input Buffer %d start: %p, length: %d\n", idx,
-           in_buffers[0].start[0], in_buffers[0].length[0]);
+           in_buffers[idx].start[0], in_buffers[idx].length[0]);
 
     bzero(&buffer, sizeof(buffer));
     bzero(&planes, sizeof(planes));
@@ -195,8 +199,11 @@ int main() {
     // }
 
     // Load the input buffer
-    planes[0].bytesused = read_into_buffer(
-        in_buffers[0].start[0], in_buffers[0].length[0], in_fp, &in_offset);
+    for (int p = 0; p < FMT_NUM_PLANES; p++) {
+      planes[p].bytesused =
+          read_into_buffer(in_buffers[idx].start[p], in_buffers[idx].length[p],
+                           in_fp, &in_offset);
+    }
 
     if (queue_buffer(drm_fd, &buffer) < 0) {
       fprintf(stderr, "Failed to queue input buffer\n");
@@ -204,57 +211,80 @@ int main() {
     }
   }
 
-  // // TODO: Check for errors
-  // start_stream(drm_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE);
-  // // TODO: Check for errors
-  // start_stream(drm_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
+  if (start_stream(drm_fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) < 0) {
+    fprintf(stderr, "Failed to start output stream\n");
+    return -1;
+  }
+  if (start_stream(drm_fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) < 0) {
+    fprintf(stderr, "Failed to start capture stream\n");
+    return -1;
+  }
 
   // TODO: Check for errors
-  // int poll_fd = create_poller(drm_fd);
+  int poll_fd = create_epoller(drm_fd);
+  struct epoll_event pevents[MAX_EVENTS];
 
   for (;;) {
-    // int status = poll_events(poll_fd);
-    int status = v4l2_select(drm_fd);
-    printf("Poll result: %d\n", status);
+    bzero(&buffer, sizeof(buffer));
+    bzero(&planes, sizeof(planes));
+    buffer.m.planes = planes;
+
+    int status = epoll_events(poll_fd, pevents);
+    // printf("Poll result: %d\n", status);
 
     if (status < 0) {
       fprintf(stderr, "Failed to poll events!\n");
       break;
     }
-    // Read from V4L2 device
-    if (status == 1) {
-      struct v4l2_buffer buffer = {0};
-      struct v4l2_plane planes[VIDEO_MAX_PLANES] = {0};
-      buffer.m.planes = planes;
-      buffer.length = FMT_NUM_PLANES;
-      buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-      buffer.memory = V4L2_MEMORY_DMABUF;
 
-      if (dequeue_buffer(drm_fd, &buffer) < 0) {
-        fprintf(stderr, "Failed to dequeue buffer\n");
-        return -1;
+    for (int i = 0; i < status; i++) {
+      int event = pevents[i].events;
+      // Read from V4L2 device
+      if (event & EPOLLIN) {
+        end = get_perf();
+        display_diff_perf(&start, &end, "Decoder");
+        buffer.length = FMT_NUM_PLANES;
+        buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        buffer.memory = V4L2_MEMORY_DMABUF;
+
+        if (dequeue_buffer(drm_fd, &buffer) < 0) {
+          fprintf(stderr, "Failed to dequeue buffer\n");
+          return -1;
+        }
+
+        printf("Buffer free: %d\n", buffer.index);
+        // drm_swap_buffers_page_flip(dri_fd, &screens[0].buffers[0],
+        //                            &screens[0].crtc);
+
+        if (queue_buffer(drm_fd, &buffer) < 0) {
+          fprintf(stderr, "Failed to dequeue buffer\n");
+          return -1;
+        }
       }
+      if (event & EPOLLOUT) {
+        buffer.length = FMT_NUM_PLANES;
+        buffer.type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+        buffer.memory = V4L2_MEMORY_MMAP;
 
-      printf("Read buffer\n");
+        if (dequeue_buffer(drm_fd, &buffer) < 0) {
+          fprintf(stderr, "Failed to dequeue buffer\n");
+          return -1;
+        }
 
-      queue_buffer(drm_fd, &buffer);
-      // continue;
+        for (int p = 0; p < FMT_NUM_PLANES; p++) {
+          planes[p].bytesused = read_into_buffer(
+              in_buffers[buffer.index].start[p],
+              in_buffers[buffer.index].length[p], in_fp, &in_offset);
+        }
 
-    } else if (status == 2) {
-      // bzero(&buffer, sizeof(buffer));
-      // bzero(&planes, sizeof(planes));
-      // buffer.m.planes = planes;
-      // init_v4l2_buffer(&buffer, 0, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
-      //                  V4L2_MEMORY_MMAP, FMT_NUM_PLANES, NULL, NULL);
-      // dequeue_buffer(drm_fd, &buffer);
-
-      // planes[0].bytesused = read_into_buffer(
-      //     in_buffers[0].start[0], in_buffers[0].length[0], in_fp,
-      //     &in_offset);
-
-      // queue_buffer(drm_fd, &buffer);
+        start = get_perf();
+        if (queue_buffer(drm_fd, &buffer) < 0) {
+          fprintf(stderr, "Failed to dequeue buffer\n");
+          return -1;
+        }
+      }
     }
-    break;
+    usleep(100000);
   }
 
   // decoder.output = screens[0].buffers[0].ptr;

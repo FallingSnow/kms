@@ -24,12 +24,12 @@
  * Stolen from:
  * https://github.com/MythTV/mythtv/blob/master/mythtv/libs/libmythtv/vsync.cpp
  */
-static int vsync_drm_wait(int drm_fd) {
+static int vsync_drm_wait(int drm_fd, unsigned int target) {
   int ret = -1;
   drm_wait_vblank_t vbl;
 
   vbl.request.type = _DRM_VBLANK_RELATIVE;
-  vbl.request.sequence = 10;
+  vbl.request.sequence = target;
 
   do {
     ret = ioctl(drm_fd, DRM_IOCTL_WAIT_VBLANK, &vbl);
@@ -45,7 +45,7 @@ static int vsync_drm_wait(int drm_fd) {
   return ret;
 }
 
-bool drm_swap_buffers_page_flip(int dri_fd, struct Framebuffer *fb,
+int drm_swap_buffers_page_flip(int dri_fd, struct Framebuffer *fb,
                                 struct drm_mode_crtc *crtc) {
   // printf("Flipping page\n");
   struct drm_mode_crtc_page_flip_target flip_target = {0};
@@ -53,6 +53,7 @@ bool drm_swap_buffers_page_flip(int dri_fd, struct Framebuffer *fb,
 
   flip_target.crtc_id = crtc->crtc_id;
   flip_target.fb_id = fb->id;
+  // flip_target.flags = DRM_MODE_PAGE_FLIP_ASYNC;
   // printf("Flipping page to %d\n", fb->id);
 
   // Since we schedules a page flip we need to wait for it to actually happen
@@ -62,21 +63,22 @@ bool drm_swap_buffers_page_flip(int dri_fd, struct Framebuffer *fb,
   if (err < 0) {
 
     if (errno == EBUSY) {
-      printf("Buffer page flip already pending. Waiting for vblank.\n");
-      vsync_drm_wait(dri_fd);
+      printf("Buffer page flip already pending. Skipping.\n");
+      return -1;
+      vsync_drm_wait(dri_fd, 1);
 
       return drm_swap_buffers_page_flip(dri_fd, fb, crtc);
     }
 
     fprintf(stderr, "Error requesting page flip, err = %d, status = %s\n", err,
             strerror(errno));
-    return true;
+    return -1;
   }
 
-  return false;
+  return 0;
 }
 
-bool drm_swap_buffers_set_crtc(int dri_fd, struct Framebuffer *fb,
+int drm_swap_buffers_set_crtc(int dri_fd, struct Framebuffer *fb,
                                struct drm_mode_crtc *crtc) {
   int err;
   crtc->fb_id = fb->id;
@@ -86,14 +88,14 @@ bool drm_swap_buffers_set_crtc(int dri_fd, struct Framebuffer *fb,
     fprintf(stderr,
             "Error getting KMS master status, status = %d, status = %s\n", err,
             strerror(errno));
-    return true;
+    return -1;
   }
 
   err = ioctl(dri_fd, DRM_IOCTL_MODE_SETCRTC, crtc); // get crtc
   if (err) {
     fprintf(stderr, "Unable to set crtc, status = %d, status = %s\n", err,
             strerror(errno));
-    return true;
+    return -1;
   }
 
   // Stop being the "master" of the DRI device
@@ -101,10 +103,10 @@ bool drm_swap_buffers_set_crtc(int dri_fd, struct Framebuffer *fb,
   if (err) {
     fprintf(stderr, "Unable to drop KMS master, status = %d, status = %s\n",
             err, strerror(errno));
-    return true;
+    return -1;
   }
 
-  return false;
+  return 0;
 }
 
 //------------------------------------------------------------------------------
@@ -157,7 +159,7 @@ int drm_set_mode(int dri_fd, struct Screen *screen) {
 // Creating a dumb buffer
 //------------------------------------------------------------------------------
 int create_buffers(int dri_fd, struct drm_mode_modeinfo *conn_mode_buf,
-                   struct Framebuffer *buffers) {
+                   struct Framebuffer *buffers, int num_buffers) {
   // We create NUM_BUFFERS buffers for each screen. These are swapped out
   // during after a vblank.
 
@@ -166,19 +168,16 @@ int create_buffers(int dri_fd, struct drm_mode_modeinfo *conn_mode_buf,
   struct drm_prime_handle prime = {0};
   int err;
 
-  for (int b = 0; b < NUM_BUFFERS; b++) {
-    struct Framebuffer *buffer = buffers + b;
+  for (int b = 0; b < num_buffers; b++) {
+    struct Framebuffer *buffer = &buffers[b];
     // If we create the buffer later, we can get the size of the screen first.
     // This must be a valid mode, so it's probably best to do this after we
     // find a valid crtc with modes.
     create_dumb.width = conn_mode_buf->hdisplay;
-    create_dumb.height = conn_mode_buf->vdisplay;
     // TODO: Find out why v4l2 and drm disagree about what size the buffer
-    // should be
-    //
-    // This should really be 16, but v4l2 wants a buffer larger that
-    // create_dumb with 16 provides
-    create_dumb.bpp = 17;
+    // should be, thats why the + 10 is here
+    create_dumb.height = conn_mode_buf->vdisplay + 10;
+    create_dumb.bpp = 16;
     err = ioctl(dri_fd, DRM_IOCTL_MODE_CREATE_DUMB, &create_dumb);
     if (err) {
       printf("Failed to create dumb buffer, status = %d, status = %s\n", err,
@@ -325,7 +324,7 @@ int drm_kms(int dri_fd, struct Screen *screens) {
 
     screen->mode = conn_mode_buf[0];
 
-    err = create_buffers(dri_fd, &screen->mode, screen->buffers);
+    err = create_buffers(dri_fd, &screen->mode, screen->buffers, screen->num_buffers);
     if (err) {
       printf("Failed to create buffers, status = %d\n", err);
       return -1;

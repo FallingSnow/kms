@@ -8,8 +8,8 @@ struct perf_clock {
   struct timespec time;
 };
 
-inline struct perf_clock get_perf();
-inline void timespec_diff(struct timespec *a, struct timespec *b,
+struct perf_clock get_perf();
+void timespec_diff(struct timespec *a, struct timespec *b,
                                  struct timespec *result);
-void display_diff_perf(struct perf_clock *start, struct perf_clock *end);
+void display_diff_perf(struct perf_clock *start, struct perf_clock *end, char *label);
 int xioctl(int fh, int request, void *arg);
