@@ -22,7 +22,8 @@
 // The raspberry pi tends to switch between card0 and card1 for the rendering
 // interface
 #define DRI_CARD_PATH "/dev/dri/card0"
-#define NUM_OUTPUT_BUFFERS 5
+#define NUM_INPUT_BUFFERS 1
+#define NUM_OUTPUT_BUFFERS 2
 
 int read_into_buffer(void *buf, int buf_len, FILE *in_fp, int *in_offset) {
   int bytesused = read_h264_au(buf, buf_len, in_fp, *in_offset);
@@ -64,7 +65,8 @@ int main() {
   int err = 0, dri_fd = 0, in_offset = 0;
   FILE *in_fp;
   struct Framebuffer fbs[NUM_OUTPUT_BUFFERS] = {0};
-  struct Screen screens[1] = {{.buffers = fbs, .num_buffers = NUM_OUTPUT_BUFFERS}};
+  struct Screen screens[1] = {
+      {.buffers = fbs, .num_buffers = NUM_OUTPUT_BUFFERS}};
   // struct Decoder decoder = {0};
   struct perf_clock start, end;
   struct v4l2_plane planes[FMT_NUM_PLANES] = {0};
@@ -119,7 +121,7 @@ int main() {
     return -1;
   }
 
-  struct buffer_mp in_buffers[NUM_OUTPUT_BUFFERS] = {0};
+  struct buffer_mp in_buffers[NUM_INPUT_BUFFERS] = {0};
   struct buffer_mp out_buffers[screens[0].num_buffers];
   bzero(&out_buffers, sizeof(out_buffers));
 
@@ -139,7 +141,9 @@ int main() {
     return -1;
   }
 
-  for (int idx = 0; idx < sizeof(out_buffers) / sizeof(out_buffers[0]); idx++) {
+  // We don't queue buffer 0 because we are pretending thats the one on screen
+  // and you can't write to the buffer on screen or you get tearing
+  for (int idx = 1; idx < sizeof(out_buffers) / sizeof(out_buffers[0]); idx++) {
     bzero(&buffer, sizeof(buffer));
     bzero(&planes, sizeof(planes));
     buffer.m.planes = planes;
@@ -241,20 +245,30 @@ int main() {
       int event = pevents[i].events;
       // Read from V4L2 device
       if (event & EPOLLIN) {
-        end = get_perf();
-        display_diff_perf(&start, &end, "Decoder");
         buffer.length = FMT_NUM_PLANES;
         buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
         buffer.memory = V4L2_MEMORY_DMABUF;
+        int past_page = screens[0].page;
 
         if (dequeue_buffer(drm_fd, &buffer) < 0) {
           fprintf(stderr, "Failed to dequeue buffer\n");
           return -1;
         }
+        end = get_perf();
+        display_diff_perf(&start, &end, "Decoder");
 
-        printf("Buffer free: %d\n", buffer.index);
-        // drm_swap_buffers_page_flip(dri_fd, &screens[0].buffers[0],
-        //                            &screens[0].crtc);
+        // out_buffers[buffer.index].fds[0];
+        drm_swap_buffers_page_flip(dri_fd, &screens[0].buffers[buffer.index],
+                                   &screens[0].crtc);
+        screens[0].page = buffer.index;
+        // printf("Swapped buffer %d for %d\n", screens[0].buffers[past_page].fds[0], screens[0].buffers[buffer.index].fds[0]);
+
+        bzero(&buffer, sizeof(buffer));
+        bzero(&planes, sizeof(planes));
+        buffer.m.planes = planes;
+        init_v4l2_buffer(&buffer, past_page,
+                         V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, V4L2_MEMORY_DMABUF,
+                         FMT_NUM_PLANES, NULL, out_buffers[past_page].fds);
 
         if (queue_buffer(drm_fd, &buffer) < 0) {
           fprintf(stderr, "Failed to dequeue buffer\n");
@@ -284,7 +298,7 @@ int main() {
         }
       }
     }
-    usleep(100000);
+    // usleep(100000);
   }
 
   // decoder.output = screens[0].buffers[0].ptr;

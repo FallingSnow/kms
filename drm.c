@@ -57,7 +57,6 @@ int drm_swap_buffers_page_flip(int dri_fd, struct Framebuffer *fb,
   // printf("Flipping page to %d\n", fb->id);
 
   // Since we schedules a page flip we need to wait for it to actually happen
-  // vsync_drm_wait(dri_fd);
   err = ioctl(dri_fd, DRM_IOCTL_MODE_PAGE_FLIP,
               &flip_target); // request a page flip
   if (err < 0) {
@@ -74,6 +73,7 @@ int drm_swap_buffers_page_flip(int dri_fd, struct Framebuffer *fb,
             strerror(errno));
     return -1;
   }
+  vsync_drm_wait(dri_fd, 1);
 
   return 0;
 }
