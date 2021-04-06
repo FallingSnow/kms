@@ -15,17 +15,13 @@
 #define FMT_NUM_PLANES 1
 #define MAX_EVENTS 4
 
-struct buffer {
-  void *ptr;
-  int length;
-};
-
 struct buffer_mp {
   enum v4l2_memory type;
   union {
     void *start[FMT_NUM_PLANES];
     __s32 fds[FMT_NUM_PLANES];
   };
+  unsigned int size[FMT_NUM_PLANES];
   unsigned int length[FMT_NUM_PLANES];
 };
 

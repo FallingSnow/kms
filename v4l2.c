@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 
 void init_v4l2_buffer(struct v4l2_buffer *buffer, int index,
                       enum v4l2_buf_type type, enum v4l2_memory mtype,
@@ -31,8 +32,17 @@ void init_v4l2_buffer(struct v4l2_buffer *buffer, int index,
   if (mtype == V4L2_MEMORY_DMABUF && dmabuf_fds != NULL) {
     if (V4L2_TYPE_IS_MULTIPLANAR(type)) {
       for (int p = 0; p < num_planes; p++) {
+        struct stat info = {0};
+
         assert(dmabuf_fds[p] != 0);
         buffer->m.planes[p].m.fd = dmabuf_fds[p];
+
+        // Get size of file descriptor
+        if (fstat(dmabuf_fds[p], &info) != 0) {
+          printf("Failed to get file descriptor buffer length\n");
+        }
+        assert(info.st_size != 0);
+        buffer->m.planes[p].length = info.st_size;
       }
     } else {
       buffer->m.fd = dmabuf_fds[0];
@@ -325,7 +335,7 @@ int create_epoller(int drm_fd) {
   return polling_fd;
 }
 
-static int handle_event(drm_fd) {
+static int handle_event(int drm_fd) {
   struct v4l2_event ev = {0};
 
   // do {
