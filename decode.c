@@ -185,7 +185,8 @@ int handle_drm_event_udp(struct epoll_event *event, struct Screen *screen,
       fprintf(stderr, "Unable to write to free buffer queue\n");
       return err;
     }
-    printf("Wrote buffer to free queue, queue size = %d\n", queue_size(free_buffers));
+    printf("Wrote buffer to free queue, queue size = %d\n",
+           queue_size(free_buffers));
   }
 
   return 0;
@@ -380,35 +381,34 @@ int main() {
            in_buffers[idx].start[0], in_buffers[idx].length[0],
            in_buffers[idx].size[0]);
 
-    // bzero(&buffer, sizeof(buffer));
-    // bzero(&planes, sizeof(planes));
-    // buffer.m.planes = planes;
-    // init_v4l2_buffer(&buffer, idx, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
-    //                  V4L2_MEMORY_MMAP, FMT_NUM_PLANES, NULL, NULL);
+    bzero(&buffer, sizeof(buffer));
+    bzero(&planes, sizeof(planes));
+    buffer.m.planes = planes;
+    init_v4l2_buffer(&buffer, idx, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
+                     V4L2_MEMORY_MMAP, FMT_NUM_PLANES, NULL, NULL);
 
-    // printf("Buffer: idx: %d, type: %d, bytesused: %d, flags: %d, field: "
-    //        "%d, memory: %d, len: %d, m.planes: %p\n",
-    //        buffer.index, buffer.type, buffer.bytesused, buffer.flags,
-    //        buffer.field, buffer.memory, buffer.length, buffer.m.planes);
-    // for (int p = 0; p < FMT_NUM_PLANES; p++) {
-    //   printf(
-    //       "Plane: idx: %d, bytesused: %d, length: %d, mem_offset: %d, fd:
-    //       %d\n", p, planes[p].bytesused, planes[p].length,
-    //       planes[p].m.mem_offset, planes[p].m.fd);
-    // }
+    printf("Buffer: idx: %d, type: %d, bytesused: %d, flags: %d, field: "
+           "%d, memory: %d, len: %d, m.planes: %p\n",
+           buffer.index, buffer.type, buffer.bytesused, buffer.flags,
+           buffer.field, buffer.memory, buffer.length, buffer.m.planes);
+    for (int p = 0; p < FMT_NUM_PLANES; p++) {
+      printf(
+          "Plane: idx: %d, bytesused: %d, length: %d, mem_offset: %d, fd: %d\n",
+          p, planes[p].bytesused, planes[p].length, planes[p].m.mem_offset,
+          planes[p].m.fd);
+    }
 
     // Load the input buffer
-    // for (int p = 0; p < FMT_NUM_PLANES; p++) {
-    //   planes[p].bytesused =
-    //       read_into_buffer(in_buffers[idx].start[p],
-    //       in_buffers[idx].length[p],
-    //                        in_fp, &in_offset);
-    // }
+    for (int p = 0; p < FMT_NUM_PLANES; p++) {
+      planes[p].bytesused =
+          read_into_buffer(in_buffers[idx].start[p], in_buffers[idx].length[p],
+                           in_fp, &in_offset);
+    }
 
-    // if (queue_buffer(drm_fd, &buffer) < 0) {
-    //   fprintf(stderr, "Failed to queue input buffer\n");
-    //   return -1;
-    // }
+    if (queue_buffer(drm_fd, &buffer) < 0) {
+      fprintf(stderr, "Failed to queue input buffer\n");
+      return -1;
+    }
     int err = queue_write(&free_buffers, in_buffers + idx);
     if (err) {
       fprintf(stderr, "Unable to write to free buffer queue\n");
@@ -429,19 +429,19 @@ int main() {
   /**
    * Listen for UDP packets
    */
-  udp_socket_fd = init_socket(7255);
+  // udp_socket_fd = init_socket(7255);
 
-  ev.events = EPOLLIN;
-  ev.data.fd = udp_socket_fd;
+  // ev.events = EPOLLIN;
+  // ev.data.fd = udp_socket_fd;
 
   // TODO: Check for errors
   int poll_fd = create_epoller(drm_fd);
 
-  if (epoll_ctl(poll_fd, EPOLL_CTL_ADD, udp_socket_fd, &ev) != 0) {
-    fprintf(stderr, "Unable to add fd to epoll, status = %s\n",
-            strerror(errno));
-    return -1;
-  }
+  // if (epoll_ctl(poll_fd, EPOLL_CTL_ADD, udp_socket_fd, &ev) != 0) {
+  //   fprintf(stderr, "Unable to add fd to epoll, status = %s\n",
+  //           strerror(errno));
+  //   return -1;
+  // }
 
   for (;;) {
     // bzero(&buffer, sizeof(buffer));
@@ -460,11 +460,11 @@ int main() {
       struct epoll_event event = pevents[i];
       epoll_data_t data = pevents[i].data;
       if (pevents[i].data.fd == drm_fd) {
-        // handle_drm_event_file(&pevents[i], &screens[0], in_buffers,
+        handle_drm_event_file(&pevents[i], &screens[0], in_buffers, out_buffers,
+                              dri_fd, in_fp, &in_offset);
+        // handle_drm_event_udp(&pevents[i], &screens[0], in_buffers,
         // out_buffers,
-        //                  dri_fd, in_fp, &in_offset);
-        handle_drm_event_udp(&pevents[i], &screens[0], in_buffers, out_buffers,
-                             dri_fd, &free_buffers);
+        //                      dri_fd, &free_buffers);
       } else if (pevents[i].data.fd == udp_socket_fd) {
         // handle_udp_event returns 1 if a frame was writen
         int frame_written = handle_udp_event(&pevents[i], &free_buffers);
